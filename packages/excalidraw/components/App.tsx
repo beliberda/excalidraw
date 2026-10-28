@@ -8805,6 +8805,11 @@ class App extends React.Component<AppProps, AppState> {
   }
 
   public getCurrentItemStrokeWidth(elementType: ExcalidrawElement["type"]) {
+    // blabla fork: currentItemStrokeWidthOverride overrides the 3 stock keys for
+    // callers that need a precise width (e.g. custom freedraw presets).
+    if (this.state.currentItemStrokeWidthOverride !== undefined) {
+      return this.state.currentItemStrokeWidthOverride;
+    }
     return getStrokeWidthByKey(
       elementType,
       this.state.currentItemStrokeWidthKey,

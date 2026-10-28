@@ -454,6 +454,14 @@ export interface AppState {
   currentItemBackgroundColor: string;
   currentItemFillStyle: ExcalidrawElement["fillStyle"];
   currentItemStrokeWidthKey: StrokeWidthKey;
+  /**
+   * blabla fork: precise stroke width override for freedraw presets that
+   * need widths outside the 3 stock keys (thin/medium/bold). Takes
+   * precedence over currentItemStrokeWidthKey in
+   * App.getCurrentItemStrokeWidth() when set; leave undefined to fall back
+   * to the stock key-based width.
+   */
+  currentItemStrokeWidthOverride?: number;
   currentItemStrokeStyle: ExcalidrawElement["strokeStyle"];
   currentItemRoughness: number;
   currentItemStrokeVariability: StrokeVariability;
