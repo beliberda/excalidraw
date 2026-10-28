@@ -1,0 +1,45 @@
+name: Publish npm packages
+
+# Собирает и публикует @excalidraw/* пакеты (common, fractional-indexing,
+# laser-pointer, math, element, excalidraw) в npm-реестр Gitea при каждом
+# пуше в master. Версия каждого пакета всегда получает суффикс с коротким
+# SHA коммита — публикация никогда не конфликтует с уже выпущенной версией.
+on:
+  push:
+    branches: [master]
+  workflow_dispatch: {}
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Set package versions (short SHA suffix)
+        run: node scripts/ci-set-versions.js "${GITHUB_SHA:0:8}"
+
+      - name: Install dependencies
+        run: yarn install --frozen-lockfile
+
+      - name: Build packages
+        run: yarn build:packages
+
+      - name: Configure npm registry auth
+        run: |
+          echo "@excalidraw:registry=https://gitea.bla-bla.tech/api/packages/gitea_blabla_admin/npm/" >> .npmrc
+          echo "//gitea.bla-bla.tech/api/packages/gitea_blabla_admin/npm/:_authToken=${NPM_TOKEN}" >> .npmrc
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
+
+      - name: Publish packages
+        run: |
+          set -e
+          for pkg in common fractional-indexing laser-pointer math element excalidraw; do
+            echo "Publishing @excalidraw/$pkg..."
+            (cd "packages/$pkg" && npm publish --registry https://gitea.bla-bla.tech/api/packages/gitea_blabla_admin/npm/)
+          done
