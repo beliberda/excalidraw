@@ -26,6 +26,10 @@ import type { Scene } from "@excalidraw/element";
 
 import { cancelStaticSceneThrottle } from "../renderer/staticScene";
 
+import { buildSpatialIndex, querySpatialIndex } from "./spatialIndex";
+
+import type { SpatialIndex } from "./spatialIndex";
+
 import type { RenderableElementsMap } from "./types";
 
 import type { AppState, ElementRenderOffsets } from "../types";
@@ -203,6 +207,29 @@ export class Renderer {
     return set;
   }
 
+  // Фаза 4 (zoom-render-performance-plan.md §6): keyed on the *stable*
+  // non-deleted elements array (`scene.getNonDeletedElements()`), which only
+  // changes identity when scene data actually changes -- not on every
+  // pan/zoom tick, unlike the `elementsMap` rebuilt fresh per render pass in
+  // `_getRenderableElements` below (it additionally excludes the
+  // currently-edited text element/newElement, which isn't scene data).
+  private spatialIndexCache = new WeakMap<
+    readonly NonDeletedExcalidrawElement[],
+    SpatialIndex
+  >();
+
+  private getSpatialIndex(
+    elements: readonly NonDeletedExcalidrawElement[],
+    elementsMap: NonDeletedElementsMap,
+  ): SpatialIndex {
+    let index = this.spatialIndexCache.get(elements);
+    if (!index) {
+      index = buildSpatialIndex(elements, elementsMap);
+      this.spatialIndexCache.set(elements, index);
+    }
+    return index;
+  }
+
   private getVisibleCanvasElements({
     elementsMap,
     zoom,
@@ -245,8 +272,28 @@ export class Renderer {
       viewTransformations,
     );
 
+    // Pre-filters via the grid before paying the (already cheap, but still
+    // per-element) bounds-lookup + comparison cost below -- on a scene
+    // spread out over far more area than one viewport, most elements never
+    // even get touched. On zoom-to-fit the viewport covers the whole scene,
+    // so this candidate set is the full scene anyway -- no regression there,
+    // just no win either (see module doc in `spatialIndex.ts`).
+    const candidates = querySpatialIndex(
+      this.getSpatialIndex(this.scene.getNonDeletedElements(), elementsMap),
+      topLeft,
+      bottomRight,
+    );
+
     const visibleElements: NonDeletedExcalidrawElement[] = [];
-    for (const element of elementsMap.values()) {
+    for (const candidate of candidates) {
+      // the per-render-pass `elementsMap` can omit the candidate (currently
+      // being edited text / the in-progress new element aren't "scene data"
+      // the index was built from) -- skip rather than fall back to the
+      // index's own copy, so behavior matches the pre-Фаза-4 full scan.
+      const element = elementsMap.get(candidate.id);
+      if (!element) {
+        continue;
+      }
       const [x1, y1, x2, y2] = getElementBounds(element, elementsMap);
       if (
         topLeft.x <= x2 &&
