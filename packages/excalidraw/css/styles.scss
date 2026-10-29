@@ -30,6 +30,14 @@
   --sal: env(safe-area-inset-left);
   --sar: env(safe-area-inset-right);
   --sat: env(safe-area-inset-top);
+
+  // blabla fork: vertical space a host app reserves above the canvas (e.g.
+  // its own chrome/header overlaying the top of `.excalidraw`). Defaults to
+  // 0 so stock embeds are unaffected; a host sets this once and both the
+  // non-compact styles panel (`.App-menu__left`) and its narrow-viewport
+  // counterpart (`.compact-shape-actions-island`, see LayerUI.tsx) shift
+  // down together instead of starting under the host's own header.
+  --excalidraw-canvas-top-inset: 0px;
 }
 
 body.excalidraw-cursor-resize,
@@ -517,6 +525,7 @@ body.excalidraw-cursor-resize * {
     max-width: 12.5rem;
     box-sizing: border-box;
     position: absolute;
+    top: var(--excalidraw-canvas-top-inset);
   }
 
   .dropdown-select {

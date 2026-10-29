@@ -212,6 +212,10 @@
 .compact-shape-actions-island {
   width: fit-content;
   overflow-x: hidden;
+  // blabla fork: same host-reserved offset as `.App-menu__left` (see
+  // variables in css/styles.scss) — this island replaces that panel on
+  // narrow viewports and must shift down together with it.
+  margin-top: var(--excalidraw-canvas-top-inset);
 }
 
 .mobile-shape-actions {
