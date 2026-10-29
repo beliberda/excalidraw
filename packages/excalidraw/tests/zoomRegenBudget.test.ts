@@ -1,6 +1,7 @@
 // @vitest-environment-options {"url": "http://localhost/"}
 
 import { RoughCanvas } from "roughjs/bin/canvas";
+import { RoughGenerator } from "roughjs/bin/generator";
 
 import { newElement } from "@excalidraw/element";
 
@@ -279,5 +280,67 @@ describe("visible-element-count sharpen gate (Фаза 2)", () => {
     );
 
     expect(regenerations).toBe(0);
+  });
+});
+
+/**
+ * Regression for Фаза 3 (zoom-render-performance-plan.md §6): an element
+ * whose on-screen size (not its data-space size — same element, just more
+ * zoomed out) falls under `ROUGHNESS_SIMPLIFY_SCREEN_PX` should be drawn
+ * with `roughness: 0`/`fillStyle: "solid"`, cheapening the rough.js
+ * generation this budget-free path still has to pay regardless of Фаза 1/2.
+ */
+describe("small-screen-size roughness simplification (Фаза 3)", () => {
+  it("zeroes roughness for a far-zoomed-out element, keeps it at normal zoom", () => {
+    const { env } = makeEnv();
+    const roughnessCalls: number[] = [];
+    const rectangleSpy = vi
+      .spyOn(RoughGenerator.prototype, "rectangle")
+      .mockImplementation(
+        (...args: Parameters<RoughGenerator["rectangle"]>) => {
+          roughnessCalls.push(args[4]?.roughness ?? -1);
+          // a harmless empty drawable -- rc.draw() iterates `sets`, nothing
+          // to draw, no canvas error.
+          return {
+            shape: "rectangle",
+            sets: [],
+            options: args[4] ?? {},
+          } as ReturnType<RoughGenerator["rectangle"]>;
+        },
+      );
+
+    const element = {
+      ...newElement({
+        type: "rectangle",
+        x: 0,
+        y: 0,
+        width: 100,
+        height: 100,
+      }),
+      id: "simplify-me",
+      roughness: 1,
+    } as NonDeletedExcalidrawElement;
+
+    // normal zoom: 100 screen px on the larger side, well over the gate.
+    renderStaticScene(
+      makeConfig([element], {
+        zoomValue: 1,
+        renderEnvironment: env,
+        canvas: makeScene(),
+      }),
+    );
+
+    // zoomed far out: same element, ~10 screen px now -- under the gate.
+    renderStaticScene(
+      makeConfig([element], {
+        zoomValue: 0.1,
+        renderEnvironment: env,
+        canvas: makeScene(),
+      }),
+    );
+
+    expect(roughnessCalls).toEqual([1, 0]);
+
+    rectangleSpy.mockRestore();
   });
 });

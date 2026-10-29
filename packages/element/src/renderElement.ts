@@ -277,6 +277,76 @@ const cappedElementCanvasSize = (
   return { width, height, scale };
 };
 
+/**
+ * Фаза 3 (zoom-render-performance-plan.md §6): below this many screen px on
+ * its larger side, an element is drawn without rough.js's hachure/cartoonist
+ * texture (`roughness: 0`, `fillStyle: "solid"`) — at that size the sketchy
+ * texture isn't perceptible anyway, but generating it (the actual rough.js
+ * cost Фаза 1/2 are working around) is the same regardless of how small the
+ * element ends up on screen. This is the engine-level analog of
+ * `LOD_MIN_SCREEN_PX` in the front's `lodElements.ts`, but independent of
+ * it: that one decides whether to draw an element *at all* on a data-level
+ * LOD copy; this one only cheapens the bitmap of an element that is still
+ * drawn normally.
+ *
+ * NOT calibrated yet (tracked in §8 of the plan doc) — per the plan's
+ * methodology (§6), start from the largest N (simplifies the most
+ * elements) and lower it only if that's visibly noticeable on typical
+ * scenes.
+ */
+const ROUGHNESS_SIMPLIFY_SCREEN_PX = 24;
+
+/** Elements with no `roughness`/`fillStyle` concept, or whose rough.js shape
+ * isn't drawn via `rc.draw` (sticky notes use a plain fill/stroke path), gain
+ * nothing from the override below. */
+const canSimplifyRoughness = (
+  element: ExcalidrawElement,
+): element is ExcalidrawElement & { roughness: number; fillStyle: string } =>
+  element.type === "rectangle" ||
+  element.type === "diamond" ||
+  element.type === "ellipse" ||
+  element.type === "line" ||
+  element.type === "arrow" ||
+  element.type === "freedraw";
+
+/**
+ * Returns `element` unchanged, or a shallow clone with `roughness`/
+ * `fillStyle` simplified for drawing — never persisted, never fed back into
+ * `elementWithCanvasCache`'s key (the clone's identity is thrown away after
+ * this one `generateElementCanvas` call; `ShapeCache.generateElementShape`
+ * below keys its own cache off object identity too, so a fresh clone here
+ * just means the simplified shape isn't reused across regenerations, same
+ * cost as the already-existing `modifyIframeLikeForRoughOptions` override).
+ */
+const simplifyForScreenSize = (
+  element: NonDeletedExcalidrawElement,
+  elementsMap: NonDeletedSceneElementsMap,
+  zoom: Zoom,
+): NonDeletedExcalidrawElement => {
+  if (!canSimplifyRoughness(element) || element.roughness === 0) {
+    return element;
+  }
+  const [x1, y1, x2, y2] = getElementAbsoluteCoords(element, elementsMap);
+  const screenWidth =
+    (isLinearElement(element) || isFreeDrawElement(element)
+      ? distance(x1, x2)
+      : element.width) * zoom.value;
+  const screenHeight =
+    (isLinearElement(element) || isFreeDrawElement(element)
+      ? distance(y1, y2)
+      : element.height) * zoom.value;
+
+  if (Math.max(screenWidth, screenHeight) >= ROUGHNESS_SIMPLIFY_SCREEN_PX) {
+    return element;
+  }
+
+  return {
+    ...element,
+    roughness: 0,
+    fillStyle: "solid",
+  } as NonDeletedExcalidrawElement;
+};
+
 const generateElementCanvas = (
   element: NonDeletedExcalidrawElement,
   elementsMap: NonDeletedSceneElementsMap,
@@ -324,7 +394,12 @@ const generateElementCanvas = (
 
   const rc = rough.canvas(canvas);
 
-  drawElementOnCanvas(element, rc, context, renderConfig);
+  drawElementOnCanvas(
+    simplifyForScreenSize(element, elementsMap, zoom),
+    rc,
+    context,
+    renderConfig,
+  );
 
   context.restore();
 
