@@ -46,16 +46,26 @@ jobs:
 
       # Gitea packages belong to the owner, not a repo, so the "Packages" tab
       # of this repo stays empty unless each package is explicitly linked to
-      # it (cosmetic only — publishing/consuming the package doesn't need it).
+      # it (cosmetic only — publishing/consuming the package doesn't need
+      # it). The link only needs to happen once per package; Gitea has no
+      # idempotent "link or no-op if already linked" response for this
+      # endpoint (docs list only 201/404), so re-linking an already-linked
+      # package on every later push errors. Never fail the job for this —
+      # it's cosmetic, and the whole run turning red on every push after the
+      # first obscures real publish failures.
       - name: Link packages to this repository
         run: |
-          set -e
           repo_name="${GITHUB_REPOSITORY##*/}"
           for pkg in common fractional-indexing laser-pointer math element excalidraw; do
             echo "Linking @excalidraw/$pkg to $repo_name..."
-            curl -sf -X POST \
+            http_code=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
               -H "Authorization: token ${NPM_TOKEN}" \
-              "https://gitea.bla-bla.tech/api/v1/packages/gitea_blabla_admin/npm/%40excalidraw%2F$pkg/-/link/$repo_name"
+              "https://gitea.bla-bla.tech/api/v1/packages/gitea_blabla_admin/npm/%40excalidraw%2F$pkg/-/link/$repo_name")
+            if [ "$http_code" = "201" ]; then
+              echo "Linked @excalidraw/$pkg."
+            else
+              echo "Link request for @excalidraw/$pkg returned $http_code (likely already linked) — not failing the job, this step is cosmetic."
+            fi
           done
         env:
           NPM_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
