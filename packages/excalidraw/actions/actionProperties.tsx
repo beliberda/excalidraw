@@ -726,7 +726,16 @@ export const actionChangeStrokeWidth = register<StrokeWidthKey>({
           strokeWidth: getStrokeWidthForElement(el, value),
         }),
       ),
-      appState: { ...appState, currentItemStrokeWidthKey: value },
+      // blabla fork: explicit choice from this panel must win over any
+      // precise currentItemStrokeWidthOverride left by a custom preset
+      // (see CustomDrawToolbar's applyPreset) — otherwise getCurrentItemStrokeWidth()
+      // keeps returning the override forever and this panel stops having any
+      // visible effect on new elements.
+      appState: {
+        ...appState,
+        currentItemStrokeWidthKey: value,
+        currentItemStrokeWidthOverride: undefined,
+      },
       captureUpdate: CaptureUpdateAction.IMMEDIATELY,
     };
   },

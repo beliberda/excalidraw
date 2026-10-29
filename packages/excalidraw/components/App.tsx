@@ -191,6 +191,8 @@ import {
   isLineElement,
   isSimpleArrow,
   StoreDelta,
+  ElementsDelta,
+  AppStateDelta,
   type ApplyToOptions,
   positionElementsOnGrid,
   calculateFixedPointForNonElbowArrowBinding,
@@ -792,6 +794,7 @@ class App extends React.Component<AppProps, AppState> {
       updateScene: this.updateScene,
       applyDeltas: this.applyDeltas,
       mutateElement: this.mutateElement,
+      mutateElementsWithHistory: this.mutateElementsWithHistory,
       updateLibrary: this.library.updateLibrary,
       addFiles: this.addFiles,
       resetScene: this.resetScene,
@@ -5075,6 +5078,67 @@ class App extends React.Component<AppProps, AppState> {
       informMutation,
       isDragging: false,
     });
+  };
+
+  /**
+   * blabla fork: apply a handful of targeted element updates (e.g. toggling
+   * `locked`) and record a correct, independent undo entry for them, without
+   * paying the O(total board elements) cost that a regular
+   * `updateScene({ elements: fullArray, captureUpdate })` call always pays —
+   * `Scene.replaceAllElements` rebuilds its id→element map and non-deleted
+   * list for the *whole* scene, and `Store.scheduleMicroAction` eagerly
+   * diffs/clones the *whole* previous snapshot against the next one,
+   * regardless of how many elements actually changed (see
+   * `detectChangedElements`/`createElementsSnapshot`). On boards with
+   * thousands of elements (e.g. after a PDF import) that is exactly what
+   * made simple one-off actions like the selection bar's lock button feel
+   * like they take half a second.
+   *
+   * Instead this mutates just the given elements in place via
+   * `scene.mutateElement` (O(updates.length)) and builds the `StoreDelta`
+   * for the undo stack directly from their own before/after state — also
+   * O(updates.length), since `ElementsDelta.calculate` only needs the two
+   * small maps we hand it, not the full board. The store's own snapshot is
+   * patched in place for the same elements so the *next* normal capture
+   * still diffs against a correct baseline.
+   */
+  public mutateElementsWithHistory = (
+    updates: ReadonlyArray<{
+      element: Mutable<ExcalidrawElement>;
+      update: ElementUpdate<Mutable<ExcalidrawElement>>;
+    }>,
+  ): void => {
+    if (!updates.length) return;
+
+    const prevElements = new Map<string, Ordered<ExcalidrawElement>>();
+    for (const { element } of updates) {
+      prevElements.set(element.id, {
+        ...element,
+      } as Ordered<ExcalidrawElement>);
+    }
+
+    for (const { element, update } of updates) {
+      this.scene.mutateElement(element, update, {
+        informMutation: true,
+        isDragging: false,
+      });
+    }
+
+    const nextElements = new Map<string, Ordered<ExcalidrawElement>>();
+    for (const { element } of updates) {
+      const ordered = element as Ordered<ExcalidrawElement>;
+      nextElements.set(element.id, ordered);
+      // keep the Store's own snapshot baseline in sync for just these
+      // elements, so a later *normal* captured change doesn't re-diff
+      // against a stale "before" value for them.
+      this.store.snapshot.elements.set(element.id, ordered);
+    }
+
+    const elementsDelta = ElementsDelta.calculate(prevElements, nextElements);
+    if (elementsDelta.isEmpty()) return;
+
+    const delta = StoreDelta.create(elementsDelta, AppStateDelta.empty());
+    this.history.record(delta);
   };
 
   public triggerRender = (

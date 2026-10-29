@@ -1401,6 +1401,16 @@ export interface ExcalidrawImperativeAPI {
   updateScene: InstanceType<typeof App>["updateScene"];
   applyDeltas: InstanceType<typeof App>["applyDeltas"];
   mutateElement: InstanceType<typeof App>["mutateElement"];
+  /**
+   * blabla fork: cheap (O(updates.length), not O(board size)) way to apply a
+   * handful of targeted element updates (e.g. toggling `locked`) with a
+   * correctly isolated undo entry. See `App.mutateElementsWithHistory` for
+   * why a regular `updateScene({ elements: fullArray, captureUpdate })` call
+   * is unsuitable for this on large boards.
+   */
+  mutateElementsWithHistory: InstanceType<
+    typeof App
+  >["mutateElementsWithHistory"];
   updateLibrary: InstanceType<typeof Library>["updateLibrary"];
   resetScene: InstanceType<typeof App>["resetScene"];
   getSceneElementsIncludingDeleted: InstanceType<
