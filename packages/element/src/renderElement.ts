@@ -74,6 +74,7 @@ import { getContainingFrame } from "./frame";
 import { getCornerRadius } from "./utils";
 
 import { ShapeCache } from "./shape";
+import { prewarmShapesInWorker } from "./shapeWorkerClient";
 import {
   getStickyNoteFooter,
   getStickyNotePathCommands,
@@ -842,8 +843,47 @@ export const startZoomRegenBudget = (
   zoomRegenDeadline = performance.now() + budgetMs;
 };
 
-export const hasDeferredZoomRegens = (): boolean =>
-  deferredZoomRegens.size > 0;
+export const hasDeferredZoomRegens = (): boolean => deferredZoomRegens.size > 0;
+
+/** Elements for which a Фаза-6 worker prewarm request has already been
+ * sent for the current version — avoids resubmitting the same element to
+ * the worker on every drain tick while it's still pending. */
+const prewarmRequestedVersion = new WeakMap<
+  NonDeletedExcalidrawElement,
+  number
+>();
+
+/**
+ * Фаза 6 (zoom-render-performance-plan.md §6): kicks off an off-main-thread
+ * prewarm of `ShapeCache` for every deferred element not already requested,
+ * so that by the time this drain loop actually reaches them (possibly a few
+ * frames from now), `ShapeCache.generateElementShape` inside
+ * `generateElementCanvas` is a cache hit instead of running rough.js
+ * synchronously. Purely a latency optimization — `regenerateDeferredZoomBitmaps`
+ * below is unchanged and correct with or without it.
+ */
+const prewarmDeferredShapesInWorker = () => {
+  const requests: Parameters<typeof prewarmShapesInWorker>[0] = [];
+  for (const [element, { renderConfig, appState }] of deferredZoomRegens) {
+    if (element.type === "selection") {
+      continue;
+    }
+    if (prewarmRequestedVersion.get(element) === element.version) {
+      continue;
+    }
+    prewarmRequestedVersion.set(element, element.version);
+    requests.push({
+      element,
+      renderConfig: {
+        isExporting: renderConfig.isExporting,
+        canvasBackgroundColor: renderConfig.canvasBackgroundColor,
+        embedsValidationStatus: renderConfig.embedsValidationStatus,
+        theme: appState.theme,
+      },
+    });
+  }
+  prewarmShapesInWorker(requests);
+};
 
 /**
  * Drains `deferredZoomRegens` under its own small budget, so the rAF loop
@@ -855,9 +895,12 @@ export const regenerateDeferredZoomBitmaps = (): boolean => {
   if (deferredZoomRegens.size === 0) {
     return false;
   }
+  prewarmDeferredShapesInWorker();
   const deadline = performance.now() + ZOOM_REGEN_BUDGET_MS;
-  for (const [element, { elementsMap, renderConfig, appState }] of
-    deferredZoomRegens) {
+  for (const [
+    element,
+    { elementsMap, renderConfig, appState },
+  ] of deferredZoomRegens) {
     const zoom: Zoom = renderConfig ? appState.zoom : DEFAULT_ZOOM;
     const elementWithCanvas = generateElementCanvas(
       element,

@@ -113,6 +113,28 @@ export class ShapeCache {
     elementWithCanvasCache.delete(element);
   };
 
+  /**
+   * Populates the cache with a shape computed elsewhere (e.g. off the main
+   * thread, see `shapeWorkerClient.ts`), as long as the element hasn't been
+   * regenerated under us in the meantime (version mismatch) and isn't
+   * already cached for this theme — mirrors the guard `generateElementShape`
+   * itself applies before writing to the cache.
+   */
+  public static setPrecomputed = <T extends ExcalidrawElement>(
+    element: T,
+    elementVersion: number,
+    shape: ElementShape,
+    theme: AppState["theme"],
+  ) => {
+    if (element.version !== elementVersion) {
+      return;
+    }
+    if (ShapeCache.get(element, theme) !== undefined) {
+      return;
+    }
+    ShapeCache.cache.set(element, { shape, theme });
+  };
+
   public static destroy = () => {
     ShapeCache.cache = new WeakMap();
   };
@@ -826,6 +848,24 @@ export const generateLinearCollisionShape = (
  *
  * @private
  */
+/**
+ * Worker-callable entry point for the pure (no DOM/cache access) part of
+ * shape generation — see `shapeWorkerClient.ts`/`shapeWorker.chunk.ts`
+ * (Фаза 6). Identical to what `ShapeCache.generateElementShape` calls
+ * synchronously inline; exported separately so both the main-thread
+ * fallback and the worker use exactly one implementation.
+ */
+export const generateElementShapePure = (
+  element: Exclude<ExcalidrawElement, ExcalidrawSelectionElement>,
+  generator: RoughGenerator,
+  renderConfig: {
+    isExporting: boolean;
+    canvasBackgroundColor: string;
+    embedsValidationStatus: EmbedsValidationStatus | null;
+    theme?: AppState["theme"];
+  },
+): ElementShape => _generateElementShape(element, generator, renderConfig);
+
 const _generateElementShape = (
   element: Exclude<ExcalidrawElement, ExcalidrawSelectionElement>,
   generator: RoughGenerator,
