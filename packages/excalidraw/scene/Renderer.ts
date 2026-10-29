@@ -1,12 +1,18 @@
 import {
   getCommonFrameId,
+  getElementBounds,
   getFrameChildrenInsertionIndex,
   getContainerElement,
   isElementInViewport,
   isTextElement,
 } from "@excalidraw/element";
 
-import { arrayToMap, memoize, toBrandedType } from "@excalidraw/common";
+import {
+  arrayToMap,
+  memoize,
+  toBrandedType,
+  viewportCoordsToSceneCoords,
+} from "@excalidraw/common";
 
 import type {
   ExcalidrawElement,
@@ -216,22 +222,37 @@ export class Renderer {
     height: AppState["height"];
     width: AppState["width"];
   }): readonly NonDeletedExcalidrawElement[] {
+    // isElementInViewport() re-derives the viewport's own scene-space corners
+    // (two viewportCoordsToSceneCoords() calls, each allocating a point and a
+    // fresh viewport-transformations object) on every call, even though those
+    // corners don't depend on the element at all. Hoisting that out of the
+    // loop turns a per-element cost into a per-frame one — on scenes with
+    // 1000+ elements this loop runs on every pan/zoom tick, so the per-element
+    // allocations were a measurable chunk of the per-tick JS cost.
+    const viewTransformations = {
+      zoom,
+      offsetLeft,
+      offsetTop,
+      scrollX,
+      scrollY,
+    };
+    const topLeft = viewportCoordsToSceneCoords(
+      { clientX: offsetLeft, clientY: offsetTop },
+      viewTransformations,
+    );
+    const bottomRight = viewportCoordsToSceneCoords(
+      { clientX: offsetLeft + width, clientY: offsetTop + height },
+      viewTransformations,
+    );
+
     const visibleElements: NonDeletedExcalidrawElement[] = [];
     for (const element of elementsMap.values()) {
+      const [x1, y1, x2, y2] = getElementBounds(element, elementsMap);
       if (
-        isElementInViewport(
-          element,
-          width,
-          height,
-          {
-            zoom,
-            offsetLeft,
-            offsetTop,
-            scrollX,
-            scrollY,
-          },
-          elementsMap,
-        )
+        topLeft.x <= x2 &&
+        topLeft.y <= y2 &&
+        bottomRight.x >= x1 &&
+        bottomRight.y >= y1
       ) {
         visibleElements.push(element);
       }
