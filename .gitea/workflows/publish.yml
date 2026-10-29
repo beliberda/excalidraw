@@ -43,3 +43,19 @@ jobs:
             echo "Publishing @excalidraw/$pkg..."
             (cd "packages/$pkg" && npm publish --registry https://gitea.bla-bla.tech/api/packages/gitea_blabla_admin/npm/)
           done
+
+      # Gitea packages belong to the owner, not a repo, so the "Packages" tab
+      # of this repo stays empty unless each package is explicitly linked to
+      # it (cosmetic only — publishing/consuming the package doesn't need it).
+      - name: Link packages to this repository
+        run: |
+          set -e
+          repo_name="${GITHUB_REPOSITORY##*/}"
+          for pkg in common fractional-indexing laser-pointer math element excalidraw; do
+            echo "Linking @excalidraw/$pkg to $repo_name..."
+            curl -sf -X POST \
+              -H "Authorization: token ${NPM_TOKEN}" \
+              "https://gitea.bla-bla.tech/api/v1/packages/gitea_blabla_admin/npm/%40excalidraw%2F$pkg/-/link/$repo_name"
+          done
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_PUBLISH_TOKEN }}
