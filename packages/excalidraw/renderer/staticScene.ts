@@ -24,6 +24,9 @@ import {
   resolveElementRenderState,
   renderElement,
   withSavedContext,
+  startZoomRegenBudget,
+  hasDeferredZoomRegens,
+  regenerateDeferredZoomBitmaps,
 } from "@excalidraw/element";
 
 import { getRenderEnvironment } from "@excalidraw/element/renderEnvironment";
@@ -77,6 +80,21 @@ const logElementRenderError = (
     element.height,
   );
 };
+
+/**
+ * Фаза 2 (zoom-render-performance-plan.md §6): above this many simultaneously
+ * visible elements, skip the final sharp regeneration pass and keep
+ * rendering the (possibly stale/off-zoom) cached bitmaps even once
+ * `shouldCacheIgnoreZoom` has reset — see `__renderStaticScene` below.
+ *
+ * NOT calibrated yet (tracked in §8 of the plan doc) — per the plan's
+ * methodology (§6), start from the most aggressive value (lowest threshold,
+ * i.e. stay blurred the most) and raise it only if that visibly degrades
+ * typical scenes, measuring with the same e2e frame-time harness used for
+ * §5/Фаза 1. This starting value is intentionally conservative (closer to
+ * "rarely trips") until that calibration pass happens.
+ */
+const LOD_SHARPEN_VISIBLE_ELEMENT_GATE = 1200;
 
 const GridLineColor = {
   [THEME.LIGHT]: {
@@ -330,7 +348,34 @@ const renderLinkIcon = (
     context.restore();
   }
 };
-const _renderStaticScene = ({
+
+const _renderStaticScene = (config: StaticSceneRenderConfig) => {
+  const { canvas } = config;
+  if (canvas === null) {
+    return;
+  }
+
+  // Arms the budget for zoom-triggered bitmap regeneration (see
+  // `startZoomRegenBudget`/`ZOOM_REGEN_BUDGET_MS` in `renderElement.ts`) —
+  // cheap when nothing needs regenerating, and only matters for the one
+  // render pass right after `shouldCacheIgnoreZoom` flips back to `false`.
+  startZoomRegenBudget();
+  lastConfigByCanvas.set(canvas, config);
+
+  __renderStaticScene(config);
+
+  // If this pass left elements on a stale (off-zoom) bitmap because they
+  // missed the budget above, keep draining them frame by frame — the regen
+  // work itself is budgeted too (`regenerateDeferredZoomBitmaps`), so this
+  // loop can't reintroduce the single big-frame stall it exists to avoid —
+  // independently of any further wheel/pointer input, until the queue is
+  // empty, at which point this pass' render is already the final one.
+  if (hasDeferredZoomRegens()) {
+    scheduleDeferredZoomRegenDrain(canvas);
+  }
+};
+
+const __renderStaticScene = ({
   canvas,
   rc,
   elementsMap,
@@ -340,15 +385,30 @@ const _renderStaticScene = ({
   appState: unsnappedAppState,
   renderConfig,
 }: StaticSceneRenderConfig) => {
-  if (canvas === null) {
-    return;
-  }
-
   const { renderGrid = true, isExporting } = renderConfig;
   // export draws vectors, not cached bitmaps — nothing to keep on the grid
-  const appState = isExporting
+  let appState = isExporting
     ? unsnappedAppState
     : snapScrollToDevicePixels(unsnappedAppState, scale);
+
+  // Фаза 2 (zoom-render-performance-plan.md §6): don't force the final,
+  // sharp regeneration pass when too many elements are simultaneously
+  // visible, even once `shouldCacheIgnoreZoom` has genuinely reset — that
+  // mass regeneration is exactly the stall this gate exists to avoid (see
+  // `startZoomRegenBudget`/Фаза 1 above, same mechanism, different gate:
+  // element count in the *current viewport*, not scene-wide, and
+  // deliberately not synced with `useLodSwap.ts`'s
+  // `LOD_ELEMENT_COUNT_THRESHOLD` — that one gates a data-level scene swap,
+  // this one gates pure rendering, no data is touched here). Only read when
+  // not already flagged mid-gesture: this is additive, never un-defers
+  // something the real flag already allows.
+  if (
+    !isExporting &&
+    !appState.shouldCacheIgnoreZoom &&
+    visibleElements.length > LOD_SHARPEN_VISIBLE_ELEMENT_GATE
+  ) {
+    appState = { ...appState, shouldCacheIgnoreZoom: true };
+  }
 
   const [normalizedWidth, normalizedHeight] = getNormalizedCanvasDimensions(
     canvas,
@@ -633,6 +693,47 @@ const getStaticSceneThrottle = (canvas: HTMLCanvasElement) => {
     staticSceneThrottles.set(canvas, entry);
   }
   return entry.throttle;
+};
+
+// One drain loop per canvas — a second deferred-regen pass arriving while a
+// loop is already running (e.g. another wheel tick lands before the queue
+// empties) must not spawn a second rAF chain racing the first.
+const deferredZoomRegenLoopRunning = new WeakSet<HTMLCanvasElement>();
+
+// The most recent render config per canvas — the drain loop below re-renders
+// from here rather than from whatever config was live when it was scheduled,
+// so a pan/edit that lands mid-drain (ordinary render calls `_renderStaticScene`
+// again, updating this) isn't painted over by a stale snapshot on the next
+// drain tick.
+const lastConfigByCanvas = new WeakMap<HTMLCanvasElement, StaticSceneRenderConfig>();
+
+/**
+ * Keeps calling `regenerateDeferredZoomBitmaps` (budgeted, see
+ * `renderElement.ts`) and re-rendering the static scene on successive
+ * animation frames until the deferred queue is drained — independently of
+ * further user input, so a one-off burst of zoom ticks still ends up fully
+ * sharp even if the user's hand leaves the wheel/trackpad right after.
+ */
+const scheduleDeferredZoomRegenDrain = (canvas: HTMLCanvasElement) => {
+  if (deferredZoomRegenLoopRunning.has(canvas)) {
+    return;
+  }
+  deferredZoomRegenLoopRunning.add(canvas);
+  const ownerWindow = canvas.ownerDocument.defaultView ?? window;
+
+  const step = () => {
+    const hasMore = regenerateDeferredZoomBitmaps();
+    const config = lastConfigByCanvas.get(canvas);
+    if (config) {
+      __renderStaticScene(config);
+    }
+    if (hasMore) {
+      ownerWindow.requestAnimationFrame(step);
+    } else {
+      deferredZoomRegenLoopRunning.delete(canvas);
+    }
+  };
+  ownerWindow.requestAnimationFrame(step);
 };
 
 /**

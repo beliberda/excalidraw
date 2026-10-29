@@ -726,6 +726,82 @@ export const elementWithCanvasCache = new WeakMap<
   ExcalidrawElementWithCanvas
 >();
 
+/**
+ * Budget (ms) for *zoom-triggered* bitmap regeneration within one static
+ * scene render pass — see `startZoomRegenBudget`. Deliberately small: when
+ * `shouldCacheIgnoreZoom` flips back to `false` (300ms debounce after the
+ * last wheel tick, `App.tsx:resetShouldCacheIgnoreZoomDebounced`), every
+ * element simultaneously visible needs its rough.js bitmap regenerated —
+ * on a zoom-to-fit of a few thousand elements that is the single frame
+ * that stalls (see zoom-render-performance-plan.md, §4/§5). Spreading that
+ * work over several frames instead keeps each one under budget; elements
+ * that miss the budget keep rendering their stale (slightly off-zoom, but
+ * still on-screen) bitmap until `regenerateDeferredZoomBitmaps` catches up.
+ */
+export const ZOOM_REGEN_BUDGET_MS = 4;
+
+/** Elements whose zoom-triggered regeneration missed this pass' budget —
+ * drained by `regenerateDeferredZoomBitmaps` on subsequent animation
+ * frames, independently of further user input. Keyed by element so a
+ * repeated miss just overwrites the args with the latest render context. */
+const deferredZoomRegens = new Map<
+  NonDeletedExcalidrawElement,
+  {
+    elementsMap: NonDeletedSceneElementsMap;
+    renderConfig: StaticCanvasRenderConfig;
+    appState: StaticCanvasAppState | InteractiveCanvasAppState;
+  }
+>();
+
+// `null` while idle — no deadline set means `generateElementWithCanvas` never
+// defers (plain, original behavior for everything that isn't a static scene
+// render pass with budgeting enabled, e.g. interactive canvas/export).
+let zoomRegenDeadline: number | null = null;
+
+/** Call once at the top of a static scene render pass, before the per-element
+ * render loop, to arm the budget for that pass. A no-op cost-wise (one
+ * `performance.now()` call) when there is nothing to regenerate. */
+export const startZoomRegenBudget = (
+  budgetMs: number = ZOOM_REGEN_BUDGET_MS,
+): void => {
+  zoomRegenDeadline = performance.now() + budgetMs;
+};
+
+export const hasDeferredZoomRegens = (): boolean =>
+  deferredZoomRegens.size > 0;
+
+/**
+ * Drains `deferredZoomRegens` under its own small budget, so the rAF loop
+ * that calls this (see `staticScene.ts`) doesn't itself reintroduce the
+ * single-big-frame stall it exists to avoid. Returns whether entries remain
+ * (caller should keep scheduling frames until this returns `false`).
+ */
+export const regenerateDeferredZoomBitmaps = (): boolean => {
+  if (deferredZoomRegens.size === 0) {
+    return false;
+  }
+  const deadline = performance.now() + ZOOM_REGEN_BUDGET_MS;
+  for (const [element, { elementsMap, renderConfig, appState }] of
+    deferredZoomRegens) {
+    const zoom: Zoom = renderConfig ? appState.zoom : DEFAULT_ZOOM;
+    const elementWithCanvas = generateElementCanvas(
+      element,
+      elementsMap,
+      zoom,
+      renderConfig,
+      appState,
+    );
+    deferredZoomRegens.delete(element);
+    if (elementWithCanvas) {
+      elementWithCanvasCache.set(element, elementWithCanvas);
+    }
+    if (performance.now() > deadline) {
+      break;
+    }
+  }
+  return deferredZoomRegens.size > 0;
+};
+
 const generateElementWithCanvas = (
   element: NonDeletedExcalidrawElement,
   elementsMap: NonDeletedSceneElementsMap,
@@ -746,15 +822,28 @@ const generateElementWithCanvas = (
   const containingFrameOpacity =
     getContainingFrame(element, elementsMap)?.opacity || 100;
 
-  if (
+  const shouldRegenerateForOtherReasons =
     !prevElementWithCanvas ||
-    shouldRegenerateBecauseZoom ||
     prevElementWithCanvas.theme !== appState.theme ||
     prevElementWithCanvas.deviceScale !== renderConfig.scale ||
     prevElementWithCanvas.environment !== renderEnvironment ||
     prevElementWithCanvas.imageCrop !== imageCrop ||
-    prevElementWithCanvas.containingFrameOpacity !== containingFrameOpacity
-  ) {
+    prevElementWithCanvas.containingFrameOpacity !== containingFrameOpacity;
+
+  if (shouldRegenerateForOtherReasons || shouldRegenerateBecauseZoom) {
+    // Only the *purely zoom-triggered* mass-regeneration is deferrable — a
+    // first render, theme switch, crop, etc. must happen synchronously (the
+    // element would otherwise be missing/stale for reasons unrelated to the
+    // zoom-regen storm this budget targets).
+    if (
+      !shouldRegenerateForOtherReasons &&
+      zoomRegenDeadline !== null &&
+      performance.now() > zoomRegenDeadline
+    ) {
+      deferredZoomRegens.set(element, { elementsMap, renderConfig, appState });
+      return prevElementWithCanvas ?? null;
+    }
+
     const elementWithCanvas = generateElementCanvas(
       element,
       elementsMap,
@@ -768,6 +857,7 @@ const generateElementWithCanvas = (
     }
 
     elementWithCanvasCache.set(element, elementWithCanvas);
+    deferredZoomRegens.delete(element);
 
     return elementWithCanvas;
   }
@@ -790,12 +880,21 @@ const generateElementWithCanvas = (
  * Right angles qualify because smoothing can be off there without aliasing
  * (for other angles it is terrible on Chromium); the right-angle test
  * tolerates float arithmetic.
+ *
+ * Also excludes a bitmap whose `zoomValue` doesn't match the current zoom —
+ * this happens for elements whose regeneration missed the budget in
+ * `generateElementWithCanvas` and is still queued in `deferredZoomRegens`
+ * (see `startZoomRegenBudget`): it is drawn resampled, same as during the
+ * gesture itself, until `regenerateDeferredZoomBitmaps` catches up — pixel
+ * snapping a bitmap rendered at a different zoom just misaligns it further.
  */
 const canSnapElement = (
   element: ExcalidrawElement,
+  elementWithCanvas: ExcalidrawElementWithCanvas,
   appState: StaticCanvasAppState | InteractiveCanvasAppState,
 ) =>
   !appState?.shouldCacheIgnoreZoom &&
+  elementWithCanvas.zoomValue === appState.zoom.value &&
   (!element.angle || isRightAngleRads(element.angle));
 
 /**
@@ -898,7 +997,7 @@ const drawElementFromCanvas = (
 
     const transform = context.getTransform();
 
-    if (canSnapElement(element, appState)) {
+    if (canSnapElement(element, elementWithCanvas, appState)) {
       // blit the cached bitmap on whole device pixels. Nearest-neighbor at a
       // fractional offset is a pixel-exact copy shifted to the nearest pixel
       // — except at an exact half pixel, where a GPU-accelerated canvas
@@ -1266,7 +1365,7 @@ const drawElement = (
 
         // see `canSnapElement` for why not during zoom gestures or at
         // other angles
-        if (canSnapElement(element, appState)) {
+        if (canSnapElement(element, elementWithCanvas, appState)) {
           // Disabling smoothing makes output much sharper, especially for
           // text. Unless for non-right angles, where the aliasing is really
           // terrible on Chromium.
