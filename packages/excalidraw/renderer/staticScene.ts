@@ -31,7 +31,11 @@ import {
 
 import { getRenderEnvironment } from "@excalidraw/element/renderEnvironment";
 
-import { getElementAbsoluteCoords } from "@excalidraw/element";
+import { getElementAbsoluteCoords, getElementBounds } from "@excalidraw/element";
+
+import { computePanReusePlan, sceneRectForBand } from "./panReuse";
+
+import type { PanReuseEligibilitySnapshot } from "./panReuse";
 
 import type { RenderEnvironment } from "@excalidraw/element/renderEnvironment";
 
@@ -349,6 +353,108 @@ const renderLinkIcon = (
   }
 };
 
+// Фаза 5 (zoom-render-performance-plan.md §6, pan-reuse) -- see panReuse.ts
+// for the eligibility/geometry math (pure, unit-tested there). Kept here
+// because it needs the actual canvas context and `__renderStaticScene` to
+// paint the exposed strips through the exact same code path a full repaint
+// uses -- see the module doc in panReuse.ts for why that's the point.
+const lastPanReuseSnapshotByCanvas = new WeakMap<
+  HTMLCanvasElement,
+  PanReuseEligibilitySnapshot
+>();
+
+/** Returns whether it painted the frame (via reuse) -- `false` means the
+ * caller must still do a full `__renderStaticScene`. Never throws out of a
+ * half-applied reuse: any failure after the shift falls through to the
+ * caller's full repaint, which repaints every pixel regardless of what this
+ * left on the canvas. */
+const tryPanReusePaint = (config: StaticSceneRenderConfig): boolean => {
+  const { canvas, scale, renderConfig, canvasNonce, visibleElements, allElementsMap } =
+    config;
+  if (!canvasNonce || renderConfig.isExporting) {
+    return false;
+  }
+
+  const appState = snapScrollToDevicePixels(config.appState, scale);
+
+  const next: PanReuseEligibilitySnapshot = {
+    canvasNonce,
+    zoomValue: appState.zoom.value,
+    scale,
+    width: canvas.width,
+    height: canvas.height,
+    theme: appState.theme,
+    renderGrid: renderConfig.renderGrid ?? true,
+    gridSize: appState.gridSize,
+    gridStep: appState.gridStep,
+    viewBackgroundColor: appState.viewBackgroundColor,
+    scrollX: appState.scrollX,
+    scrollY: appState.scrollY,
+  };
+
+  const prev = lastPanReuseSnapshotByCanvas.get(canvas);
+  // Recorded unconditionally, whether or not the plan below is eligible --
+  // the *next* tick's comparison must be against what actually ended up on
+  // the canvas this tick (reused or fully repainted), never a stale one.
+  lastPanReuseSnapshotByCanvas.set(canvas, next);
+
+  const plan = computePanReusePlan(prev, next);
+  if (!plan) {
+    return false;
+  }
+
+  const context = canvas.getContext("2d");
+  if (!context) {
+    return false;
+  }
+
+  const devicePixels = next.zoomValue * next.scale;
+
+  context.setTransform(1, 0, 0, 1, 0, 0);
+  // Self-blit: per spec, the source snapshot for drawImage is taken before
+  // any part of the destination is modified by this call, so shifting a
+  // canvas onto itself is well-defined, not a read-during-write race.
+  context.drawImage(canvas, plan.dx, plan.dy);
+
+  for (const band of plan.bands) {
+    const sceneRect = sceneRectForBand(
+      band,
+      next.scrollX,
+      next.scrollY,
+      devicePixels,
+    );
+    // Same bbox comparison `Renderer.getVisibleCanvasElements` uses --
+    // restricts the (already viewport-limited) `visibleElements` further to
+    // just this strip, so the strip repaint below doesn't redo work for
+    // elements the shift already preserved correctly.
+    const bandElements = visibleElements.filter((element) => {
+      const [x1, y1, x2, y2] = getElementBounds(element, allElementsMap);
+      return (
+        sceneRect.x1 <= x2 &&
+        sceneRect.y1 <= y2 &&
+        sceneRect.x2 >= x1 &&
+        sceneRect.y2 >= y1
+      );
+    });
+
+    context.save();
+    try {
+      context.beginPath();
+      context.rect(band.x, band.y, band.w, band.h);
+      context.clip();
+      // The exact same full-repaint function every other frame uses, just
+      // clipped to this strip and fed the strip's candidate elements --
+      // see the module doc in panReuse.ts for why this (not a parallel
+      // strip-painting implementation) is the point.
+      __renderStaticScene({ ...config, appState, visibleElements: bandElements });
+    } finally {
+      context.restore();
+    }
+  }
+
+  return true;
+};
+
 const _renderStaticScene = (config: StaticSceneRenderConfig) => {
   const { canvas } = config;
   if (canvas === null) {
@@ -362,7 +468,9 @@ const _renderStaticScene = (config: StaticSceneRenderConfig) => {
   startZoomRegenBudget();
   lastConfigByCanvas.set(canvas, config);
 
-  __renderStaticScene(config);
+  if (!tryPanReusePaint(config)) {
+    __renderStaticScene(config);
+  }
 
   // If this pass left elements on a stale (off-zoom) bitmap because they
   // missed the budget above, keep draining them frame by frame — the regen

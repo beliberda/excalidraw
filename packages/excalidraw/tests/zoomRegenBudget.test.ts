@@ -17,6 +17,7 @@ import type {
 
 import { getDefaultAppState } from "../appState";
 import { renderStaticScene } from "../renderer/staticScene";
+import { regenerateDeferredZoomBitmaps } from "@excalidraw/element";
 
 import type { StaticCanvasAppState } from "../types";
 import type {
@@ -108,6 +109,16 @@ const makeConfig = (
 };
 
 afterEach(() => {
+  // `deferredZoomRegens` (renderElement.ts) is module-level, shared across
+  // every test in this file -- a test that deliberately leaves elements
+  // deferred (to prove deferral happened) must not leak them into the next
+  // test's budget/drain-loop assertions. `regenerateDeferredZoomBitmaps`
+  // itself reads `performance.now()`, so this must run before the spy below
+  // is restored.
+  while (regenerateDeferredZoomBitmaps()) {
+    // drain fully, ignoring its own per-call budget -- this is cleanup, not
+    // something under test here.
+  }
   vi.restoreAllMocks();
   vi.useRealTimers();
 });

@@ -11,14 +11,24 @@ import type { NormalizedZoomValue } from "../types";
 type CanvasEvent = {
   type: string;
   transform: [number, number, number, number, number, number];
-  props: { dx: number; dy: number; dWidth: number };
+  props: { img: unknown; dx: number; dy: number; dWidth: number };
 };
 
 /** the static canvas's element blits, in device pixels */
 const getBlits = () => {
   const context = GlobalTestState.canvas.getContext("2d") as any;
   return (context.__getEvents() as CanvasEvent[])
-    .filter((event) => event.type === "drawImage")
+    .filter(
+      (event) =>
+        event.type === "drawImage" &&
+        // Фаза 5 (pan-reuse, zoom-render-performance-plan.md §6) self-blits
+        // the whole canvas onto itself (`drawImage(canvas, dx, dy)`) to
+        // shift already-painted pixels on a pure scroll change -- that's
+        // not an element blit, and (being an identity-transform copy of the
+        // full canvas) would otherwise masquerade as a trivially
+        // whole-pixel-aligned one at whatever zoom reads as scale 1.
+        event.props.img !== GlobalTestState.canvas,
+    )
     .map(({ transform: [a, b, c, d, e, f], props }) => ({
       // the matrix's scale, whatever its rotation
       scale: Math.hypot(a, b),
@@ -30,11 +40,26 @@ const getBlits = () => {
 
 /** re-renders at the given viewport and returns that render's blits */
 const renderAt = async (zoom: number, scrollX: number, scrollY: number) => {
+  // Force a fresh scene nonce so Фаза 5's pan-reuse (pan-reuse,
+  // zoom-render-performance-plan.md §6) never decides this particular
+  // scroll change doesn't need to touch an element these tests want to
+  // inspect -- these assertions are about where an element lands when it
+  // *is* (re)painted, not about whether this specific transition happens to
+  // qualify as a reusable pure pan in the running app. Its own (otherwise
+  // irrelevant) render's events are cleared below, before the one we
+  // actually care about.
   (GlobalTestState.canvas.getContext("2d") as any).__clearEvents();
-  API.setAppState({
-    zoom: { value: zoom as NormalizedZoomValue },
-    scrollX,
-    scrollY,
+  // Both state changes committed together (one `act()`, not two) so the
+  // bumped nonce and the new scroll land in the *same* render -- bumping
+  // the nonce in an earlier, separate commit would just make it this
+  // render's (unhelpfully stable) "previous" value instead.
+  act(() => {
+    window.h.elements = [...window.h.elements];
+    window.h.setState({
+      zoom: { value: zoom as NormalizedZoomValue },
+      scrollX,
+      scrollY,
+    });
   });
   return waitFor(() => {
     // the static scene renders on the next frame

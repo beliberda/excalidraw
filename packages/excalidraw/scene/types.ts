@@ -114,6 +114,18 @@ export type StaticSceneRenderConfig = {
   scale: number;
   appState: StaticCanvasAppState;
   renderConfig: StaticCanvasRenderConfig;
+  /**
+   * Same nonce `StaticCanvas`'s `React.memo` already gates re-renders on
+   * (`Renderer.getRenderableElements`'s `canvasNonce`) — changes whenever
+   * scene data, the editing/new-element state, or selection-driven reorder
+   * inputs change. Фаза 5 (zoom-render-performance-plan.md §6, pan-reuse)
+   * uses it as the "scene data didn't change since the last paint" signal
+   * gating whether a pure scroll change may reuse the previous frame's
+   * pixels instead of a full repaint. Optional: callers that don't pass it
+   * (export, tests) simply never engage pan-reuse — always falls back to a
+   * full, unconditionally-correct repaint.
+   */
+  canvasNonce?: string;
 };
 
 export type InteractiveSceneRenderAnimationState = {
