@@ -8,12 +8,6 @@ export class ExcalidrawFontFace {
   public readonly urls: URL[] | DataURL[];
   public readonly fontFace: FontFace;
 
-  private static readonly ASSETS_FALLBACK_URL = `https://esm.sh/${
-    import.meta.env.PKG_NAME
-      ? `${import.meta.env.PKG_NAME}@${import.meta.env.PKG_VERSION}` // is provided during package build
-      : "@excalidraw/excalidraw" // fallback to the latest package version (i.e. for app)
-  }/dist/prod/`;
-
   constructor(family: string, uri: string, descriptors?: FontFaceDescriptors) {
     this.urls = ExcalidrawFontFace.createUrls(uri);
 
@@ -161,10 +155,13 @@ export class ExcalidrawFontFace {
         const normalizedBaseUrl = this.normalizeBaseUrl(path);
         urls.push(new URL(assetUrl, normalizedBaseUrl));
       });
+    } else {
+      // our fork always self-hosts fonts; consumers must set
+      // `window.EXCALIDRAW_ASSET_PATH` instead of relying on an external CDN
+      console.error(
+        `Failed to resolve font url for "${assetUrl}": "window.EXCALIDRAW_ASSET_PATH" is not set.`,
+      );
     }
-
-    // fallback url for bundled fonts
-    urls.push(new URL(assetUrl, ExcalidrawFontFace.ASSETS_FALLBACK_URL));
 
     return urls;
   }
